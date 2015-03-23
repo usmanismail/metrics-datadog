@@ -12,6 +12,7 @@
     <artifactId>metrics-datadog</artifactId>
     <name>Datadog Metrics Reporter</name>
     <description>A Datadog reporter backend for Coda Hale's Metrics</description>
+    <version>1.0.7-kik-SNAPSHOT</version>
 
     <dependencies>
         <dependency>

@@ -10,6 +10,7 @@ import com.codahale.metrics.MetricFilter;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.Timer;
+
 import org.coursera.metrics.datadog.DatadogReporter.Expansion;
 import org.coursera.metrics.datadog.model.DatadogCounter;
 import org.coursera.metrics.datadog.model.DatadogGauge;
@@ -17,6 +18,7 @@ import org.coursera.metrics.datadog.transport.Transport;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.InOrder;
+import org.mockito.internal.matchers.Any;
 
 import java.io.IOException;
 import java.util.*;
@@ -25,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -332,7 +335,7 @@ public class DatadogReporterTest {
     dynamicTags.add("status:active");
     dynamicTags.add("speed:29");
 
-    when(callback.getTags()).thenReturn(dynamicTags);
+    when(callback.getTags(anyString())).thenReturn(dynamicTags);
 
     final Counter counter = mock(Counter.class);
     when(counter.getCount()).thenReturn(100L);
