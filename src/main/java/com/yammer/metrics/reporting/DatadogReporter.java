@@ -7,6 +7,7 @@ import com.yammer.metrics.reporting.Transport.Request;
 import com.yammer.metrics.reporting.model.DatadogCounter;
 import com.yammer.metrics.reporting.model.DatadogGauge;
 import com.yammer.metrics.stats.Snapshot;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,8 +16,9 @@ import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
 
-public class DatadogReporter extends AbstractPollingReporter implements
-                                                             MetricProcessor<Long> {
+public class DatadogReporter extends AbstractPollingReporter
+    implements
+      MetricProcessor<Long> {
 
   public boolean printVmMetrics = true;
   protected final Locale locale = Locale.US;
@@ -27,19 +29,30 @@ public class DatadogReporter extends AbstractPollingReporter implements
   protected final EnumSet<Expansions> expansions;
   private static final Logger LOG = LoggerFactory
       .getLogger(DatadogReporter.class);
-  private final VirtualMachineMetrics vm;
+  public static final String SKIP_NAME = "SKIP";
   private final MetricNameFormatter metricNameFormatter;
   private final List<String> tags;
+  private DynamicTagCallback tagCallback;
   private Request request;
 
+  private final JVMMetricsCollector vm;
+
   public DatadogReporter(MetricsRegistry metricsRegistry,
-                         MetricPredicate predicate, VirtualMachineMetrics vm, Transport transport,
-                         Clock clock, String host, EnumSet<Expansions> expansions,
-                         Boolean printVmMetrics,
-                         MetricNameFormatter metricNameFormatter,
-                         List<String> tags) {
+      MetricPredicate predicate, JVMMetricsCollector vm, Transport transport,
+      Clock clock, String host, EnumSet<Expansions> expansions,
+      Boolean printVmMetrics, MetricNameFormatter metricNameFormatter,
+      List<String> tags) {
+
+    this(metricsRegistry, predicate, vm, transport, clock, host, expansions,
+        printVmMetrics, metricNameFormatter, tags, null);
+  }
+
+  public DatadogReporter(MetricsRegistry metricsRegistry,
+      MetricPredicate predicate, JVMMetricsCollector vm, Transport transport,
+      Clock clock, String host, EnumSet<Expansions> expansions,
+      Boolean printVmMetrics, MetricNameFormatter metricNameFormatter,
+      List<String> tags, DynamicTagCallback tagCallback) {
     super(metricsRegistry, "datadog-reporter");
-    this.vm = vm;
     this.transport = transport;
     this.predicate = predicate;
     this.clock = clock;
@@ -48,6 +61,9 @@ public class DatadogReporter extends AbstractPollingReporter implements
     this.printVmMetrics = printVmMetrics;
     this.metricNameFormatter = metricNameFormatter;
     this.tags = tags;
+    this.vm = vm;
+    this.tagCallback = tagCallback;
+
   }
 
   @Override
@@ -101,7 +117,8 @@ public class DatadogReporter extends AbstractPollingReporter implements
     maybeExpand(Expansions.RATE_MEAN, name, meter.meanRate(), epoch);
     maybeExpand(Expansions.RATE_1_MINUTE, name, meter.oneMinuteRate(), epoch);
     maybeExpand(Expansions.RATE_5_MINUTE, name, meter.fiveMinuteRate(), epoch);
-    maybeExpand(Expansions.RATE_15_MINUTE, name, meter.fifteenMinuteRate(), epoch);
+    maybeExpand(Expansions.RATE_15_MINUTE, name, meter.fifteenMinuteRate(),
+        epoch);
   }
 
   public void processTimer(MetricName name, Timer timer, Long epoch)
@@ -112,7 +129,7 @@ public class DatadogReporter extends AbstractPollingReporter implements
   }
 
   private void pushSummarizable(MetricName name, Summarizable summarizable,
-                                Long epoch) {
+      Long epoch) {
     maybeExpand(Expansions.MIN, name, summarizable.min(), epoch);
     maybeExpand(Expansions.MAX, name, summarizable.max(), epoch);
     maybeExpand(Expansions.MEAN, name, summarizable.mean(), epoch);
@@ -129,7 +146,8 @@ public class DatadogReporter extends AbstractPollingReporter implements
     maybeExpand(Expansions.P999, name, snapshot.get999thPercentile(), epoch);
   }
 
-  private void maybeExpand(Expansions expansion, MetricName name, Number count, Long epoch) {
+  private void maybeExpand(Expansions expansion, MetricName name, Number count,
+      Long epoch) {
     if (expansions.contains(expansion)) {
       pushGauge(name, count, epoch, expansion.toString());
     }
@@ -145,6 +163,7 @@ public class DatadogReporter extends AbstractPollingReporter implements
             metric.processWith(this, subEntry.getKey(), epoch);
           } catch (Exception e) {
             LOG.error("Error pushing metric", e);
+            e.printStackTrace();
           }
         }
       }
@@ -152,51 +171,85 @@ public class DatadogReporter extends AbstractPollingReporter implements
   }
 
   protected void pushVmMetrics(long epoch) {
-    sendGauge("jvm.memory.heap.committed", vm.heapCommitted(), epoch);
-    sendGauge("jvm.memory.heap.used", vm.heapUsed(), epoch);
 
-    pushGauge("jvm.daemon_thread_count", vm.daemonThreadCount(), epoch);
-    pushGauge("jvm.thread_count", vm.threadCount(), epoch);
+    sendGauge("jvm.heap_committed", Arrays.asList("type:Memory"),
+        vm.heapCommitted(), epoch);
+    sendGauge("jvm.heap_used", Arrays.asList("type:Memory"), vm.heapUsed(),
+        epoch);
 
-    for (Entry<String, VirtualMachineMetrics.GarbageCollectorStats> entry : vm
+    pushGauge("jvm.thread_count", Arrays.asList("type:Threading"),
+        vm.getThreadCount(), epoch);
+    pushGauge("jvm.system_load_average", Arrays.asList("type:OperatingSystem"),
+        vm.getSystemLoadAverage(), epoch);
+
+    for (Entry<String, JVMMetricsCollector.GarbageCollectorStats> entry : vm
         .garbageCollectors().entrySet()) {
-      final String tag = "[type:" + entry.getKey() + "]";
-      pushGauge("jvm.gc.time" + tag, entry.getValue().getTime(TimeUnit.MILLISECONDS), epoch);
-      pushCounter("jvm.gc.runs" + tag, entry.getValue().getRuns(), epoch);
+      final String tag = "type:" + entry.getKey();
+      pushGauge("jvm.gc_time", Arrays.asList(tag),
+          entry.getValue().getTime(TimeUnit.MILLISECONDS), epoch);
+      pushCounter("jvm.gc_runs", Arrays.asList(tag),
+          entry.getValue().getRuns(), epoch);
     }
   }
 
   private void pushCounter(MetricName metricName, Long count, Long epoch,
-                           String... path) {
-    pushCounter(metricNameFormatter.format(metricName, path), count, epoch);
+      String... path) {
+    pushCounter(metricNameFormatter.format(metricName, path),
+        getDynamicTags(metricName), count, epoch);
 
   }
 
-  private void pushCounter(String name, Long count, Long epoch) {
-    DatadogCounter counter = new DatadogCounter(name, count, epoch, host, this.tags);
-    try {
-      request.addCounter(counter);
-    } catch (Exception e) {
-      LOG.error("Error writing counter", e);
+  private void pushCounter(String name, List<String> metrictags, Long count,
+      Long epoch) {
+    if (!name.equals(SKIP_NAME)) {
+      DatadogCounter counter = new DatadogCounter(name, count, epoch, host,
+          metrictags);
+      try {
+        request.addCounter(counter);
+      } catch (Exception e) {
+        LOG.error("Error writing counter", e);
+      }
     }
   }
 
   private void pushGauge(MetricName metricName, Number count, Long epoch,
-                         String... path) {
-    sendGauge(metricNameFormatter.format(metricName, path), count, epoch);
+      String... path) {
+    sendGauge(metricNameFormatter.format(metricName, path),
+        getDynamicTags(metricName), count, epoch);
   }
 
-  private void pushGauge(String name, long count, long epoch) {
-    sendGauge(name, new Long(count), epoch);
+  private void pushGauge(String name, List<String> metricTags, long count,
+      long epoch) {
+    sendGauge(name, metricTags, new Long(count), epoch);
   }
 
-  private void sendGauge(String name, Number count, Long epoch) {
-    DatadogGauge gauge = new DatadogGauge(name, count, epoch, host, this.tags);
-    try {
-      request.addGauge(gauge);
-    } catch (Exception e) {
-      LOG.error("Error writing gauge", e);
+  private void pushGauge(String name, List<String> metricTags, Number count,
+      long epoch) {
+    sendGauge(name, metricTags, count, epoch);
+  }
+
+  private void sendGauge(String name, List<String> metricTags, Number count,
+      Long epoch) {
+    if (!name.equals(SKIP_NAME)) {
+      DatadogGauge gauge = new DatadogGauge(name, count, epoch, host,
+          metricTags);
+      try {
+        request.addGauge(gauge);
+      } catch (Exception e) {
+        LOG.error("Error writing gauge", e);
+      }
     }
+  }
+
+  private List<String> getDynamicTags(MetricName name) {
+    List<String> newTags = new ArrayList<String>();
+    if (this.tagCallback != null) {
+      newTags.addAll(this.tagCallback.getDynamicTags(name));
+    }
+    if (this.tags != null) {
+      newTags.addAll(this.tags);
+    }
+    return newTags;
   }
 
   @Override
@@ -210,21 +263,10 @@ public class DatadogReporter extends AbstractPollingReporter implements
   }
 
   public static enum Expansions {
-    COUNT("count"),
-    RATE_MEAN("meanRate"),
-    RATE_1_MINUTE("1MinuteRate"),
-    RATE_5_MINUTE("5MinuteRate"),
-    RATE_15_MINUTE("15MinuteRate"),
-    MIN("min"),
-    MEAN("mean"),
-    MAX("max"),
-    STD_DEV("stddev"),
-    MEDIAN("median"),
-    P75("p75"),
-    P95("p95"),
-    P98("p98"),
-    P99("p99"),
-    P999("p999");
+    COUNT("count"), RATE_MEAN("meanRate"), RATE_1_MINUTE("1MinuteRate"), RATE_5_MINUTE(
+        "5MinuteRate"), RATE_15_MINUTE("15MinuteRate"), MIN("min"), MEAN("mean"), MAX(
+        "max"), STD_DEV("stddev"), MEDIAN("median"), P75("p75"), P95("p95"), P98(
+        "p98"), P99("p99"), P999("p999");
 
     public static EnumSet<Expansions> ALL = EnumSet.allOf(Expansions.class);
 
@@ -252,6 +294,7 @@ public class DatadogReporter extends AbstractPollingReporter implements
     private List<String> tags = new ArrayList<String>();
     private MetricsRegistry metricsRegistry = Metrics.defaultRegistry();
     private Transport transport = null;
+    private DynamicTagCallback tagCallback;
 
     public Builder withHost(String host) {
       this.host = host;
@@ -279,13 +322,17 @@ public class DatadogReporter extends AbstractPollingReporter implements
     }
 
     /**
-     * Tags that would be sent to datadog with each and every metrics. This could be used to set global metrics
-     * like version of the app, environment etc.
-     * @param tags List of tags eg: [env:prod, version:1.0.1, name:kafka_client] etc
+     * Tags that would be sent to datadog with each and every metrics. This
+     * could be used to set global metrics like version of the app, environment
+     * etc.
+     * 
+     * @param tags
+     *          List of tags eg: [env:prod, version:1.0.1, name:kafka_client]
+     *          etc
      */
     public Builder withTags(List<String> tags) {
-        this.tags = tags;
-        return this;
+      this.tags = tags;
+      return this;
     }
 
     public Builder withClock(Clock clock) {
@@ -308,9 +355,14 @@ public class DatadogReporter extends AbstractPollingReporter implements
       return this;
     }
 
+    public Builder withTagCallback(DynamicTagCallback tagCallback) {
+      this.tagCallback = tagCallback;
+      return this;
+    }
+
     /**
-     * The transport mechanism to push metrics to datadog. Supports http webservice and UDP dogstatsd protocol
-     * as of now.
+     * The transport mechanism to push metrics to datadog. Supports http
+     * webservice and UDP dogstatsd protocol as of now.
      *
      * @see HttpTransport
      * @see com.yammer.metrics.reporting.transport.UdpTransport
@@ -324,17 +376,10 @@ public class DatadogReporter extends AbstractPollingReporter implements
       if (transport == null) {
         this.transport = new HttpTransport(apiKey);
       }
-      return new DatadogReporter(
-        metricsRegistry,
-        this.predicate,
-        VirtualMachineMetrics.getInstance(),
-        transport,
-        this.clock,
-        this.host,
-        this.expansions,
-        this.vmMetrics,
-        metricNameFormatter,
-        this.tags);
+      return new DatadogReporter(metricsRegistry, predicate,
+          JVMMetricsCollector.INSTANCE, transport, this.clock, this.host,
+          this.expansions, this.vmMetrics, metricNameFormatter, this.tags,
+          this.tagCallback);
     }
   }
 }
